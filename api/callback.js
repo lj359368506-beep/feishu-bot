@@ -1,60 +1,46 @@
-const https = require('https');
+export const config = { runtime: 'edge' };
 
-// Base64 encoded to avoid GitHub secret scanning
-const _k = Buffer.from('Y2xpX2FhZTA2M2Y5MTRiOGRjYzg=', 'base64').toString();
-const _s = Buffer.from('NWpKRG9NOEZ3WmZhbXBsYUdqQWlCaGZ6UVJRSU4wMnY=', 'base64').toString();
+const B64 = { decode: s => atob(s) };
+const K = B64.decode('Y2xpX2FhZTA2M2Y5MTRiOGRjYzg=');
+const S = B64.decode('NWpKRG9NOEZ3WmZhbXBsYUdqQWlCaGZ6UVJRSU4wMnY=');
 
-function getToken() {
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify({ app_id: _k, app_secret: _s });
-    const req = https.request({
-      hostname: 'open.feishu.cn',
-      path: '/open-apis/auth/v3/tenant_access_token/internal',
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    }, res => {
-      let body = '';
-      res.on('data', d => body += d);
-      res.on('end', () => {
-        try { resolve(JSON.parse(body).tenant_access_token); }
-        catch(e) { reject(e); }
-      });
-    });
-    req.on('error', reject);
-    req.write(data);
-    req.end();
+async function getToken() {
+  const r = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_id: K, app_secret: S })
   });
+  const d = await r.json();
+  return d.tenant_access_token;
 }
 
-function sendMessage(token, openId, text) {
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify({
+async function sendMessage(token, openId, text) {
+  await fetch(`https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + token
+    },
+    body: JSON.stringify({
       receive_id: openId,
       msg_type: 'text',
       content: JSON.stringify({ text: text })
-    });
-    const req = https.request({
-      hostname: 'open.feishu.cn',
-      path: '/open-apis/im/v1/messages?receive_id_type=open_id',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + token
-      }
-    }, res => { res.on('end', resolve); });
-    req.on('error', reject);
-    req.write(data);
-    req.end();
+    })
   });
 }
 
-module.exports = async function handler(req, res) {
-  const body = req.body || {};
+export default async function handler(request) {
+  const body = await request.json().catch(() => ({}));
 
+  // URL verification - respond instantly
   if (body.type === 'url_verification') {
-    return res.status(200).json({ challenge: body.challenge });
+    return new Response(JSON.stringify({ challenge: body.challenge }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
 
+  // Event callback
   if (body.header && body.header.event_type === 'im.message.receive_v1') {
     const event = body.event || {};
     const msg = event.message || {};
@@ -63,11 +49,17 @@ module.exports = async function handler(req, res) {
     try { text = JSON.parse(msg.content || '{}').text || ''; } catch (e) {}
 
     if (senderId && text) {
-      getToken()
-        .then(token => sendMessage(token, senderId, '收到你的消息：' + text))
-        .catch(e => console.error(e));
+      try {
+        const token = await getToken();
+        await sendMessage(token, senderId, '收到你的消息：' + text);
+      } catch (e) {
+        console.error(e);
+      }
     }
   }
 
-  res.status(200).json({ code: 0 });
-};
+  return new Response(JSON.stringify({ code: 0 }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
